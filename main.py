@@ -93,7 +93,7 @@ async def upload_file(file: UploadFile = File(...)):
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS documents 
                      (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, processed_at TIMESTAMP, status TEXT, extracted_fields INTEGER, data TEXT)''')
-    cursor.execute('INSERT INTO documents (filename, processed_at, status, extracted_fields, data) VALUES (?, datetime('now'), ?, ?, ?)',
+    cursor.execute('INSERT INTO documents (filename, processed_at, status, extracted_fields, data) VALUES (?, datetime("now"), ?, ?, ?)',
                    (file.filename, "Sucesso", len([v for v in result["extracted_data"].values() if v != "Não encontrado"]), json.dumps(result)))
     conn.commit()
     doc_id = cursor.lastrowid
