@@ -1,20 +1,13 @@
-# Versão para Render
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
+import re
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
 import pdfplumber
-import pytesseract
-from PIL import Image
-import io
 import sqlite3
 import json
-import csv
-import re
+import io
 
 app = FastAPI()
 
-# Configurar CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,134 +16,98 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configurar banco de dados SQLite
-def init_db():
-    conn = sqlite3.connect("documents.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT,
-            processed_at TEXT,
-            status TEXT,
-            extracted_fields INTEGER,
-            data TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+# Conexão com o banco SQLite
+def get_db_connection():
+    conn = sqlite3.connect('documents.db')
+    conn.row_factory = sqlite3.Row
+    return conn
 
-# Inicializar o banco de dados
-init_db()
-
-# Função para processar arquivos (PDFs ou imagens)
-def process_document(file_content: bytes, filename: str) -> dict:
+# Função para processar o documento (apenas PDFs)
+def process_document(file_content, filename):
     try:
-        text = ""
-        extracted_data = []
-        # Verificar o tipo de arquivo
-        if filename.lower().endswith(".pdf"):
-            with pdfplumber.open(io.BytesIO(file_content)) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text() or ""
-                    text += page_text.replace("\n", " ")
-        elif filename.lower().endswith((".png", ".jpg", ".jpeg")):
-            image = Image.open(io.BytesIO(file_content))
-            text = pytesseract.image_to_string(image, lang="por").replace("\n", " ")
-        else:
-            raise HTTPException(status_code=400, detail="Formato de arquivo não suportado")
+        if not filename.lower().endswith('.pdf'):
+            return {"error": "Apenas arquivos PDF são suportados no momento"}
 
-        # Extrair campos com regex (exemplo para NFS-e)
-        cnpj = re.search(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", text)
-        nome = re.search(r"Nome/NomeEmpresarial\s+([A-Z\s]+)", text)
-        valor = re.search(r"ValordoServiço\s+R\$([\d,.]+)", text)
-        extracted_data = [
-            {"campo": "CNPJ", "valor": cnpj.group(0) if cnpj else "Não encontrado", "confiança": 0.95},
-            {"campo": "Nome", "valor": nome.group(1).strip() if nome else "Não encontrado", "confiança": 0.90},
-            {"campo": "Valor do Serviço", "valor": valor.group(1) if valor else "Não encontrado", "confiança": 0.90}
-        ]
-        return {"fields": extracted_data, "raw_text": text.strip()}
+        with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+            text = ''.join(page.extract_text() for page in pdf.pages if page.extract_text())
+
+        # Expressões regulares para extrair os campos
+        patterns = {
+            "placa": r"[A-Z]{3}\d[A-Z]\d{3}",  # Ex.: NZV2F04
+            "nome_vendedor": r"[A-Z\s]+(?=\sDO\sPRADO|\sDE\sSOUZA)",  # Ex.: JOSE CARLOS DO PRADO SOUZA JUNIO
+            "renavam": r"\d{11}(?=\sCPF)",  # Ex.: 00466456352
+            "cpf_cnpj_vendedor": r"\d{3}\.\d{3}\.\d{3}-\d{2}",  # Ex.: 124.991.626-78
+            "email_vendedor": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",  # Ex.: GVMUDI@GMAIL.COM
+            "municipio_vendedor": r"[A-Z\s]+(?=\sMG)",  # Ex.: UBERLANDIA
+            "uf_vendedor": r"MG(?=\sANO)",  # Ex.: MG
+            "ano_fabricacao": r"\d{4}(?=\s\d{4})",  # Ex.: 2012
+            "ano_modelo": r"\d{4}(?=\sValor)",  # Ex.: 2013
+            "valor_venda": r"R\$\s?\d{1,3}(?:\.\d{3})*,\d{2}",  # Ex.: R$ 25.391,12
+            "marca_modelo_versao": r"[A-Z]+/[A-Z\s]+(?=\sAutorizo)",  # Ex.: FIAT/PALIO FIRE ECONOMY
+            "cor": r"[A-Z\s]+(?=\s9BD)",  # Ex.: PRATA
+            "chassi": r"9BD\d{14}",  # Ex.: 9BD17164LD5827924
+            "data_venda": r"\d{2}/\d{2}/\d{4}(?=\sNÚMERO)",  # Ex.: 10/03/2025
+            "numero_crv": r"\d{12}(?=\s\d{11})",  # Ex.: 223389785779
+            "codigo_seguranca_crv": r"\d{11}(?=\sNÚMERO)",  # Ex.: 25531084607
+            "numero_atpve": r"\d{15}",  # Ex.: 250691017456352
+            "data_emissao_crv": r"\d{2}/\d{2}/\d{4}(?=\sASSINATURA)",  # Ex.: 30/03/2022
+            "hodometro": r"\d+(?=\sIDENTIFICAÇÃO)",  # Ex.: 0
+            "nome_comprador": r"[A-Z\s]+(?=\sDE\sMELO)",  # Ex.: RAFAELA FARIA DE MELO
+            "cpf_cnpj_comprador": r"\d{3}\.\d{3}\.\d{3}-\d{2}(?=\sGVMUDI)",  # Ex.: 065.391.846-11
+            "email_comprador": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?=\sMUNICÍPIO)",  # Ex.: GVMUDI@GMAIL.COM
+            "municipio_comprador": r"[A-Z\s]+(?=\sMG)",  # Ex.: UBERLANDIA
+            "uf_comprador": r"MG(?=\sENDEREÇO)",  # Ex.: MG
+            "endereco_comprador": r"[A-Z\s\d]+(?=\sCEP)",  # Ex.: R VERIDIANO TEODORO DOS SANTOS 1080 LUIZOTE DE FREITAS
+            "cep_comprador": r"\d{5}-\d{3}"  # Ex.: 38414-315
+        }
+
+        # Dicionário para armazenar os resultados
+        extracted_data = {}
+
+        # Extrair os campos
+        for campo, pattern in patterns.items():
+            match = re.search(pattern, text, re.IGNORECASE)
+            extracted_data[campo] = match.group().strip() if match else "Não encontrado"
+
+        return {
+            "extracted_data": extracted_data,
+            "raw_text": text
+        }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao processar o arquivo: {str(e)}")
+        return {"error": str(e)}
 
 @app.post("/api/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...)):
     content = await file.read()
-    extracted_data = process_document(content, file.filename)
-    doc_id = None
-    try:
-        conn = sqlite3.connect("documents.db")
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO documents (filename, processed_at, status, extracted_fields, data) VALUES (?, ?, ?, ?, ?)",
-            (
-                file.filename,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Sucesso",
-                len(extracted_data["fields"]),
-                json.dumps(extracted_data)
-            )
-        )
-        doc_id = cursor.lastrowid
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Erro ao salvar no banco: {str(e)}")
-    finally:
-        conn.close()
-    return JSONResponse(content={"message": "Documento processado com sucesso", "data": extracted_data, "doc_id": doc_id})
+    result = process_document(content, file.filename)
+
+    if "error" in result:
+        return {"message": "Erro ao processar o documento", "error": result["error"]}
+
+    # Salvar no banco SQLite
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS documents 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, processed_at TIMESTAMP, status TEXT, extracted_fields INTEGER, data TEXT)''')
+    cursor.execute('INSERT INTO documents (filename, processed_at, status, extracted_fields, data) VALUES (?, datetime('now'), ?, ?, ?)',
+                   (file.filename, "Sucesso", len([v for v in result["extracted_data"].values() if v != "Não encontrado"]), json.dumps(result)))
+    conn.commit()
+    doc_id = cursor.lastrowid
+    conn.close()
+
+    # Retornar a resposta no formato desejado
+    return {
+        "message": "Documento processado com sucesso",
+        "doc_id": doc_id,
+        **result["extracted_data"]
+    }
 
 @app.get("/api/documents")
-async def list_documents():
-    try:
-        conn = sqlite3.connect("documents.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, filename, processed_at, status, extracted_fields, data FROM documents")
-        documents = [
-            {
-                "id": row[0],
-                "filename": row[1],
-                "processed_at": row[2],
-                "status": row[3],
-                "extracted_fields": row[4],
-                "data": json.loads(row[5])
-            }
-            for row in cursor.fetchall()
-        ]
-        return JSONResponse(content={"documents": documents})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao consultar o banco: {str(e)}")
-    finally:
-        conn.close()
-
-@app.get("/api/export/{doc_id}")
-async def export_document(doc_id: int, format: str = "json"):
-    try:
-        conn = sqlite3.connect("documents.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT data FROM documents WHERE id = ?", (doc_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Documento não encontrado")
-        data = json.loads(row[0])
-        if format == "json":
-            return JSONResponse(content=data)
-        elif format == "csv":
-            output = io.StringIO()
-            writer = csv.writer(output)
-            writer.writerow(["Campo", "Valor", "Confiança"])
-            for field in data["fields"]:
-                writer.writerow([field["campo"], field["valor"], field["confiança"]])
-            return {"content": output.getvalue()}
-        else:
-            raise HTTPException(status_code=400, detail="Formato inválido")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao exportar: {str(e)}")
-    finally:
-        conn.close()
-
-@app.post("/api/integrate/{platform}")
-async def integrate_platform(platform: str, payload: dict):
-    if platform.lower() in ["bubble", "airtable", "webflow"]:
-        return JSONResponse(content={"message": f"Integrado com {platform} com sucesso"})
-    raise HTTPException(status_code=400, detail="Plataforma não suportada")
+def get_documents():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM documents")
+    documents = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return {"documents": documents}
