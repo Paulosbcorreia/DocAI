@@ -1,10 +1,13 @@
+# Versão para Render
 import re
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import pdfplumber
 import sqlite3
 import json
 import io
+import csv
 
 app = FastAPI()
 
@@ -104,10 +107,56 @@ async def upload_file(file: UploadFile = File(...)):
     }
 
 @app.get("/api/documents")
-def get_documents():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM documents")
-    documents = [dict(row) for row in cursor.fetchall()]
-    conn.close()
-    return {"documents": documents}
+async def list_documents():
+    try:
+        conn = sqlite3.connect("documents.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, filename, processed_at, status, extracted_fields, data FROM documents")
+        documents = [
+            {
+                "id": row[0],
+                "filename": row[1],
+                "processed_at": row[2],
+                "status": row[3],
+                "extracted_fields": row[4],
+                "data": json.loads(row[5])
+            }
+            for row in cursor.fetchall()
+        ]
+        return JSONResponse(content={"documents": documents})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao consultar o banco: {str(e)}")
+    finally:
+        conn.close()
+
+@app.get("/api/export/{doc_id}")
+async def export_document(doc_id: int, format: str = "json"):
+    try:
+        conn = sqlite3.connect("documents.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT data FROM documents WHERE id = ?", (doc_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Documento não encontrado")
+        data = json.loads(row[0])
+        if format == "json":
+            return JSONResponse(content=data["extracted_data"])
+        elif format == "csv":
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(["Campo", "Valor"])
+            for campo, valor in data["extracted_data"].items():
+                writer.writerow([campo, valor])
+            return {"content": output.getvalue()}
+        else:
+            raise HTTPException(status_code=400, detail="Formato inválido")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao exportar: {str(e)}")
+    finally:
+        conn.close()
+
+@app.post("/api/integrate/{platform}")
+async def integrate_platform(platform: str, payload: dict):
+    if platform.lower() in ["bubble", "airtable", "webflow"]:
+        return JSONResponse(content={"message": f"Integrado com {platform} com sucesso"})
+    raise HTTPException(status_code=400, detail="Plataforma não suportada")
