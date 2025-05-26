@@ -1,16 +1,13 @@
 # Versão para Render
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
+import re
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
 import pdfplumber
 import pytesseract
 from PIL import Image
-import io
 import sqlite3
 import json
-import csv
-import re
+import io
 
 app = FastAPI()
 
